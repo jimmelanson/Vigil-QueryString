@@ -1,7 +1,8 @@
 NAME
 
     Vigil::QueryString - Safe, flexible query string construction and
-    management
+    management. Ever wish you could store an array or a hash in a
+	query string? Now you can!
 
 SYNOPSIS
 

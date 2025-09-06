@@ -3,225 +3,167 @@ package Vigil::QueryString;
 use strict;
 use warnings;
 use URI::Escape;
+use JSON;  # use core JSON module
 
 our $VERSION = 1.0.0;
 
 sub new {
     my ($class) = @_;
     bless { 
-	    _encryption_key => undef, 
-		_aad        => undef,
-		_extracted  => 0,
-		_contents   => {},
-		_new_qs     => {},
-		_flatten_returned_lists => 0,
-		_last_error => '' }, $class;
+        _encryption_key => undef, 
+        _aad            => undef,
+        _extracted      => 0,
+        _contents       => {},
+        _new_qs         => {},
+        _flatten_returned_lists => 0,
+        _error     => [], 
+    }, $class;
 }
 
 sub encryption_key {
-	my($self, %args) = @_;
-	%args = map { lc($_) => $args{$_} } keys %args;
+    my($self, %args) = @_;
+    %args = map { lc($_) => $args{$_} } keys %args;
     unless(defined $args{encryption_key} && length($args{encryption_key}) == 64) {
-		die "Vigil::QueryString: Invalid encryption key length (must be 64 hex chars)";
-        return;
+        die "Vigil::QueryString: Invalid encryption key length (must be 64 hex chars)";
     }
-	$self->{_encryption_key} = $args{encryption_key};
-	$self->{_aad} = $args{aad};
+    $self->{_encryption_key} = $args{encryption_key};
+    $self->{_aad} = $args{aad};
     return 1;
 }
 
 sub encryption_aad {
-	my ($self, $aad) = @_;
-	if(defined $aad && length($aad) > 0) {
-		$self->{_aad} = $aad;
-	}
-	return 1;
+    my ($self, $aad) = @_;
+    $self->{_aad} = $aad if defined $aad && length $aad;
+    return 1;
 }
 
 sub flatten_returned_list { $_[0]->{_flatten_returned_lists} = $_[1] ? 1 : 0; }
 
+sub errors { return $_[0]->{_error} || []; }
+
 sub get {
     my ($self, @keys) = @_;
-	
-    # Ensure we have extracted the incoming QS
     $self->_extract unless $self->{_extracted};
-	
     my $data = $self->{_contents};
 
-
-    # No args: return full hashref (with arrayrefs for multi-value keys)
+    # No keys → return full hashref
     if (!@keys) {
-        my %result;
-        foreach my $key (keys %$data) {
-            if ($data->{$key} =~ /,/) {
-                my @vals = split /,/, $data->{$key};
-                $result{$key} = \@vals;
-            } else {
-                $result{$key} = $data->{$key};
-            }
-        }
-        return \%result;
+        return { map { $_ => $data->{$_} } keys %$data };
     }
 
-    # Single key
+    # Single key → return its value or undef
     if (@keys == 1) {
         my $key = $keys[0];
-        return undef unless exists $data->{$key};
-        if ($data->{$key} =~ /,/) {
-            my @vals = split /,/, $data->{$key};
-            #return \@vals;
-			return $self->{_flatten_returned_lists} ? join(',', @vals) : \@vals;
-        }
-        return $data->{$key};
+        return exists $data->{$key} ? $data->{$key} : undef;
     }
 
-    # Multiple keys
-    my @result;
-    foreach my $key (@keys) {
-        if (exists $data->{$key}) {
-            if ($data->{$key} =~ /,/) {
-                my @vals = split /,/, $data->{$key};
-                push @result, \@vals;
-            } else {
-                push @result, $data->{$key};
-            }
-        } else {
-            push @result, undef;
-        }
-    }
-    return \@result;
+    # Multiple keys → return arrayref of values
+    return [ map { exists $data->{$_} ? $data->{$_} : undef } @keys ];
 }
-
 
 
 sub add {
     my ($self, @args) = @_;
-
-    # Flatten if a single ref is passed
+	$self->_extract unless $self->{_extracted};
     if (@args == 1) {
         if (ref $args[0] eq 'ARRAY')  { @args = @{$args[0]}; }
         elsif (ref $args[0] eq 'HASH') { @args = %{$args[0]}; }
     }
-
-    # Convert list to hash to normalize key/value pairs
     my %pairs = @args;
-
-    # Replace existing values with new arrayrefs
     for my $key (keys %pairs) {
-        my $val = $pairs{$key};
-
-        if (ref($val) eq 'ARRAY') {
-            # Flatten nested arrays
-            $val = [ map { ref($_) eq 'ARRAY' ? @$_ : $_ } @$val ];
-        }
-        elsif (ref($val) eq 'HASH') {
-            # Flatten hash into alternating key,value pairs
-            $val = [ map { ($_ => $val->{$_}) } sort keys %$val ];
-        }
-        else {
-            $val = [$val];  # wrap scalar
-        }
-
-        $self->{_new_qs}{$key} = $val;
+		my $clean_key = $self->_sanitize_key($key);
+        $self->{_new_qs}{$clean_key} = $pairs{$key};
     }
 }
 
 sub append {
     my ($self, @args) = @_;
-
-    # Flatten if a single ref is passed
+	$self->_extract unless $self->{_extracted};
     if (@args == 1) {
         if (ref $args[0] eq 'ARRAY')  { @args = @{$args[0]}; }
         elsif (ref $args[0] eq 'HASH') { @args = %{$args[0]}; }
     }
-
-    # Convert list to hash to normalize key/value pairs
     my %pairs = @args;
 
     for my $key (keys %pairs) {
         my $val = $pairs{$key};
+		
+		my $clean_key = $self->_sanitize_key($key);
+		
+        my $existing = $self->{_new_qs}{$clean_key};
 
-        if (ref($val) eq 'ARRAY') {
-            $val = [ map { ref($_) eq 'ARRAY' ? @$_ : $_ } @$val ];
-        }
-        elsif (ref($val) eq 'HASH') {
-            $val = [ map { ($_ => $val->{$_}) } sort keys %$val ];
-        }
-        else {
-            $val = [$val];
-        }
+        unless (defined $existing) { $self->{_new_qs}{$clean_key} = $val; next }
 
-        # Push values into the existing arrayref
-        push @{ $self->{_new_qs}{$key} ||= [] }, @$val;
+        if (!ref $existing) {
+            if (!ref $val) { $self->{_new_qs}{$clean_key} .= $val }
+            elsif (ref $val eq 'ARRAY') { $self->{_new_qs}{$clean_key} = [$existing, @$val] }
+            else { push @{ $self->{_error} }, "Cannot append hashref to scalar key '$key'"; }
+        }
+        elsif (ref $existing eq 'ARRAY') {
+            if (!ref $val) { push @$existing, $val }
+            elsif (ref $val eq 'ARRAY') { push @$existing, @$val }
+            else { push @{ $self->{_error} }, "Cannot append hashref to array key '$key'"; }
+        }
+        elsif (ref $existing eq 'HASH') {
+            if (!ref $val) { push @{ $self->{_error} }, "Cannot append scalar to hash key '$key'"; }
+            elsif (ref $val eq 'ARRAY') {
+                if (@$val % 2) { push @{ $self->{_error} }, "Array must have even number of items to append to hash key '$key'"; }
+                else { while(@$val){ $existing->{shift @$val} = shift @$val } }
+            }
+            elsif (ref $val eq 'HASH') { $self->_merge_hash($existing, $val) }
+        }
+        else { push @{ $self->{_error} }, "Unsupported type for key '$key'"; }
     }
 }
 
 sub copy {
     my ($self) = @_;
-
-    # Ensure we have extracted the incoming QS
     $self->_extract unless $self->{_extracted};
-
-    # Copy all extracted key/value pairs into _new_qs
     for my $key (keys %{ $self->{_contents} }) {
         my $val = $self->{_contents}{$key};
-        # Duplicate arrayrefs to avoid modifying the original
-        $self->{_new_qs}{$key} = ref $val eq 'ARRAY' ? [ @$val ] : $val;
+        if (ref $val eq 'ARRAY') { $self->{_new_qs}{$key} = [ @$val ] }
+        elsif (ref $val eq 'HASH') { $self->{_new_qs}{$key} = { %$val } }
+        else { $self->{_new_qs}{$key} = $val }
     }
-
-    return 1;  # success
+    return 1;
 }
 
 sub reset {
     my ($self) = @_;
     $self->{_extracted} = 0;
     $self->{_contents} = {};
-	$self->{_flatten_returned_lists} = 0;
-	$self->{_new_qs} = {};
-    #$self->_extract;
+    $self->{_flatten_returned_lists} = 0;
+    $self->{_new_qs} = {};
 }
 
 sub delete {
-	my ($self, @args) = @_;
-	delete $self->{_new_qs}{ $_ } foreach @args;
+    my ($self, @args) = @_;
+    delete $self->{_new_qs}{ $_ } foreach @args;
 }
 
 sub exists {
-	my ($self, $key) = @_;
-	return exists $self->{_new_qs}{$key};
+    my ($self, $key) = @_;
+	$self->_extract unless $self->{_extracted};
+    return exists $self->{_new_qs}{$key};
 }
 
 sub create {
     my $self = shift;
-	$self->add(@_) if @_;
-    my $new_qs;
-    # Build from $self->{_new_qs}
-    if ($self->{_new_qs} && keys %{ $self->{_new_qs} }) {
-        for my $key (sort keys %{ $self->{_new_qs} }) {
-            $new_qs .= '&' if $new_qs;
+	$self->_extract unless $self->{_extracted};
+    $self->add(@_) if @_;
+    return unless $self->{_new_qs} && keys %{ $self->{_new_qs} };
 
-            my $value = defined $self->{_new_qs}{$key} ? $self->{_new_qs}{$key} : '';
+    # JSON encode entire structure
+    my $json = JSON::encode_json($self->{_new_qs});
+    $json = $self->_url_encode($json);
 
-            # Flatten arrayrefs
-            if (ref($value) eq 'ARRAY') {
-                $value = join(',', @$value);
-
-            # Flatten hashrefs into key=value,key=value form
-            } elsif (ref($value) eq 'HASH') {
-                $value = join(',', map { "$_=$value->{$_}" } keys %$value);
-            }
-
-            $value = $self->_url_encode($value) if $value;
-            $new_qs .= $key . '=' . $value;
-        }
-    }
-	return unless $new_qs;
     if ($self->{_encryption_key}) {
         use Vigil::Crypt;
         my $crypt = Vigil::Crypt->new($self->{_encryption_key});
-        $new_qs = $crypt->encrypt($new_qs, $self->{_aad});
+        $json = $crypt->encrypt($json, $self->{_aad});
     }
-	return '?' . $new_qs;
+
+    return '?' . $json;
 }
 
 sub create_reset {
@@ -231,92 +173,105 @@ sub create_reset {
 }
 
 sub _extract {
-	my $self = shift;
-	return if $self->{_extracted};
-	$self->{_extracted} = 1;
-	my %temp;
-	if( $ENV{QUERY_STRING} ne "" ){
-		my $query_string = $ENV{QUERY_STRING};
-		$query_string =~ s/^\?//;
-		if($self->{_encryption_key}) {
-			use Vigil::Crypt;
-			my $crypt = Vigil::Crypt->new($self->{_encryption_key});
-			$query_string = $crypt->decrypt($query_string, $self->{_aad});
-		}
-		$query_string = $self->_url_decode($query_string);
-		my @temp_qs_pairs = split(/\&/, $query_string);
-		foreach my $temp_qs_pair (@temp_qs_pairs) {
-			my($temp_qs_key, $temp_qs_value) = split(/\=/, $temp_qs_pair);
-			$temp_qs_key = $self->_sanitize($temp_qs_key);
-			$temp_qs_value = $self->_sanitize($temp_qs_value);
-			
-			# Convert empty string to undef, but preserve "0"
-            $temp_qs_value = undef if defined($temp_qs_value) && $temp_qs_value eq '';
+    my $self = shift;
+    return if $self->{_extracted};
+    $self->{_extracted} = 1;
 
-            #First at the gate
-			$temp{$temp_qs_key} = $temp_qs_value unless exists $temp{$temp_qs_key};
+    return unless $ENV{QUERY_STRING} && $ENV{QUERY_STRING} ne '';
+    my $qs = $ENV{QUERY_STRING};
+    $qs =~ s/^\?//;
 
-		}
-	}
-	$self->{_contents} = \%temp;
+    if ($self->{_encryption_key}) {
+        use Vigil::Crypt;
+        my $crypt = Vigil::Crypt->new($self->{_encryption_key});
+        $qs = $crypt->decrypt($qs, $self->{_aad});
+    }
+
+    $qs = $self->_url_decode($qs);
+
+    my $data = eval { JSON::decode_json($qs) };
+    if ($@) {
+        push @{ $self->{_error} }, "Failed to parse JSON query string: $@";
+        $self->{_contents} = {};
+    } else {
+        # Sanitize all top-level keys
+        my %clean;
+        for my $key (keys %$data) {
+            my $safe_key = $self->_sanitize_key($key);
+            $clean{$safe_key} = $data->{$key};
+        }
+        $self->{_contents} = \%clean;
+    }
+}
+
+
+
+sub _merge_hash {
+    my ($self, $target, $source) = @_;
+    for my $k (keys %$source) {
+        if (exists $target->{$k} && ref $target->{$k} eq 'HASH' && ref $source->{$k} eq 'HASH') {
+            $self->_merge_hash($target->{$k}, $source->{$k});
+        } else {
+            $target->{$k} = $source->{$k};
+        }
+    }
 }
 
 sub _url_encode {
-	my ($self, $string) = @_;
-	return unless defined $string && $string;
+    my ($self, $string) = @_;
+    return unless defined $string && $string;
     $string =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
     return $string;
 }
 
 sub _url_decode {
-	my ($self, $string) = @_;
-	return unless defined $string && $string;
-	$string =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
-	return $string;
+    my ($self, $string) = @_;
+    return unless defined $string && $string;
+    $string =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
+    return $string;
 }
 
-sub _sanitize {
-	my ($self, $value) = @_;
-	return unless defined($value) && ($value ne '' || $value == 0);
-    $value =~ s/\%0A//ig; # LF
-    $value =~ s/\%0D//ig; # CR
-	$value =~ s/<.+?>//gs;
-	$value =~ s/<!--(.|\n)*-->//gsx;
-	$value =~ s/\\//g;
-	$value =~ s/\.\.([\/\:]|$)//g;
-	$value =~ s/\.([\/\:]|$)//g;
-	$value =~ s!\.\./!!g;
-	$value =~ s/^\.$//g;
-	#Encoded HTML tags
-	$value =~ s/(\%3C).+?(\%3E)//ig;
-	#Double encoded HTML tags
-	$value =~ s/(\%253C).+?(\%253E)//ig;
-	#Basic HTML entities
-	$value =~ s/\&quot\;//ig;
-	$value =~ s/\&gt\;//ig;
-	$value =~ s/\&lt\;//ig;
-	$value =~ s/\%2e//ig; # .
-	$value =~ s/\%2f//ig; # /
-	$value =~ s/\%5c//ig; # \
-	$value =~ s/\%252E//ig; # .
-	$value =~ s/\%255C//ig; # /
-	$value =~ s/\%c0%af//ig; # /
-	$value =~ s/\%c1%9c//ig; # \
-	#Other things
-	$value =~ s/\%00//ig;
-	$value =~ s/\x00//ig;
-	$value =~ s/\~//g;
+sub _sanitize_key {
+    my ($self, $key) = @_;
+    return unless defined $key && $key ne '';
 
-	return $value;
+    # Remove leading/trailing whitespace
+    $key =~ s/^\s+|\s+$//g;
+
+    # Block dangerous characters: null, slashes, dots at start, HTML brackets
+    $key =~ s/\0//g;         # null
+    $key =~ s![\/\\]!!g;     # forward/back slashes
+    $key =~ s/^\.+//;        # leading dots
+    $key =~ s/[<>]//g;       # angle brackets
+
+    # Collapse multiple spaces to single
+    $key =~ s/\s+/ /g;
+
+    return $key;
 }
 
 1;
 
 __END__
 
+
+Existing type   New type    Action
+scalar          scalar      concatenate
+scalar          arrayref	convert scalar → array, push new values
+scalar          hashref     error
+arrayref        scalar      push scalar
+arrayref        arrayref    push items
+arrayref        hashref     error
+hashref         scalar      error
+hashref         arrayref    even number → convert to k/v pairs; odd → error
+hashref         hashref     merge recursively (HoH supported)
+
+
+
 =head1 NAME
 
-Vigil::QueryString - Safe, flexible query string construction and management
+Vigil::QueryString - Safe, flexible query string construction and management. Ever wish you could store an array or a hash in a
+	query string? Now you can!
 
 =head1 SYNOPSIS
 
