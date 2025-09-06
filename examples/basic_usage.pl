@@ -3,13 +3,8 @@ use strict;
 use warnings;
 use Test::More;
 use Data::Dumper;
-
-use FindBin;
-use lib "$FindBin::Bin/../lib";
-
-#Faking an incoming query string for demonstration purposes
-#$ENV{QUERY_STRING} = '%7B%22cartid%22%3A834770%2C%22categories_visited%22%3A%5B%22radio%22%2C%22laptop%22%2C%22gardening%20supplies%22%2C%22tablet%22%2C%22smartwatch%22%5D%2C%22custid%22%3A123%2C%22settings%22%3A%7B%22bottom%22%3A15%2C%22prefs%22%3A%7B%22color%22%3A%22%23111%22%2C%22text-size%22%3A%2214pt%22%2C%22font-family%22%3A%22verdana%22%2C%22line-height%22%3A1.5%2C%22side%22%3A10%2C%22top%22%3A15%7D%7D%7D';
-
+#use FindBin;
+#use lib "$FindBin::Bin/../lib";
 use Vigil::QueryString;
 
 my $qs = Vigil::QueryString->new;
@@ -31,6 +26,10 @@ my $qs_data = {
         'tablet',
         'smartwatch',
     ],
+	matrix => [
+	    [1,2],
+		[3,4]
+	],
     custid => 123,
     settings => {
         bottom => 15,
@@ -44,6 +43,7 @@ my $qs_data = {
         },
     },
 };
+
 print Dumper $qs_data;
 print "\n\n";
 
@@ -77,6 +77,18 @@ $qs->append(
 		}
 	}
 );
+
+print "\n\nNow we are going to add a nested array to an array:\n";
+print q~$qs->append('matrix', [[5,6]]);~, "\n\n";
+$qs->append('matrix', [[5,6]]);
+my $matrix_ref = $qs->get('matrix');
+print Dumper $matrix_ref;
+
+
+
+
+
+
 
 print "\n\nNow we are going to add a deeper level key/value pair to the hash of hashed:\n";
 print q~$qs->append(
@@ -142,6 +154,17 @@ print "print \$categories_ref->[1] : ", $categories_ref->[1], "\n";
 print "print \$categories_ref->[2] : ", $categories_ref->[2], "\n";
 print "print \$categories_ref->[3] : ", $categories_ref->[3], "\n";
 print "print \$categories_ref->[4] : ", $categories_ref->[4], "\n\n";
+
+print "Now we print some nested arrays from key/value pairs:\n";
+my $matrix_ref = $qs_incoming->get('matrix');
+print "my \$matrix_ref = \$qs_incoming->get('matrix');\n";
+print "print \$matrix_ref->[0][0] : ", $matrix_ref->[0][0], "\n";
+print "print \$matrix_ref->[0][1] : ", $matrix_ref->[0][1], "\n";
+print "print \$matrix_ref->[1][0] : ", $matrix_ref->[1][0], "\n";
+print "print \$matrix_ref->[1][1] : ", $matrix_ref->[1][1], "\n";
+print "print \$matrix_ref->[2][0] : ", $matrix_ref->[2][0], "\n";
+print "print \$matrix_ref->[2][1] : ", $matrix_ref->[2][1], "\n\n";
+
 
 print "Now we print some key/value pairs where values are in a hash ref:\n";
 my $settings_ref = $qs_incoming->get('settings');

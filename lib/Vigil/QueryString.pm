@@ -5,7 +5,7 @@ use warnings;
 use URI::Escape;
 use JSON;  # use core JSON module
 
-our $VERSION = 1.0.0;
+our $VERSION = 1.3.1;
 
 sub new {
     my ($class) = @_;
@@ -78,43 +78,58 @@ sub add {
 
 sub append {
     my ($self, @args) = @_;
-	$self->_extract unless $self->{_extracted};
+
+    # Flatten single ref argument
     if (@args == 1) {
         if (ref $args[0] eq 'ARRAY')  { @args = @{$args[0]}; }
         elsif (ref $args[0] eq 'HASH') { @args = %{$args[0]}; }
     }
+
     my %pairs = @args;
 
     for my $key (keys %pairs) {
-        my $val = $pairs{$key};
-		
-		my $clean_key = $self->_sanitize_key($key);
-		
-        my $existing = $self->{_new_qs}{$clean_key};
+        my $val       = $pairs{$key};
+        my $clean_key = $self->_sanitize_key($key);
+        my $existing  = $self->{_new_qs}{$clean_key};
 
-        unless (defined $existing) { $self->{_new_qs}{$clean_key} = $val; next }
+        unless (defined $existing) {
+            $self->{_new_qs}{$clean_key} = $val;
+            next;
+        }
 
         if (!ref $existing) {
             if (!ref $val) { $self->{_new_qs}{$clean_key} .= $val }
             elsif (ref $val eq 'ARRAY') { $self->{_new_qs}{$clean_key} = [$existing, @$val] }
-            else { push @{ $self->{_error} }, "Cannot append hashref to scalar key '$key'"; }
+            elsif (ref $val eq 'HASH') { $self->{_error} = "Cannot append hashref to scalar key '$key'" }
         }
         elsif (ref $existing eq 'ARRAY') {
-            if (!ref $val) { push @$existing, $val }
-            elsif (ref $val eq 'ARRAY') { push @$existing, @$val }
-            else { push @{ $self->{_error} }, "Cannot append hashref to array key '$key'"; }
+            $self->_merge_array($existing, $val);
         }
         elsif (ref $existing eq 'HASH') {
-            if (!ref $val) { push @{ $self->{_error} }, "Cannot append scalar to hash key '$key'"; }
-            elsif (ref $val eq 'ARRAY') {
-                if (@$val % 2) { push @{ $self->{_error} }, "Array must have even number of items to append to hash key '$key'"; }
-                else { while(@$val){ $existing->{shift @$val} = shift @$val } }
+            if (!ref $val) {
+                $self->{_error} = "Cannot append scalar to hash key '$key'";
             }
-            elsif (ref $val eq 'HASH') { $self->_merge_hash($existing, $val) }
+            elsif (ref $val eq 'ARRAY') {
+                if (@$val % 2) {
+                    $self->{_error} = "Array must have even number of items to append to hash key '$key'";
+                } else {
+                    while (@$val) {
+                        my $k = shift @$val;
+                        my $v = shift @$val;
+                        $existing->{$k} = $v;
+                    }
+                }
+            }
+            elsif (ref $val eq 'HASH') {
+                $self->_merge_hash($existing, $val);
+            }
         }
-        else { push @{ $self->{_error} }, "Unsupported type for key '$key'"; }
+        else {
+            $self->{_error} = "Unsupported type for key '$key'";
+        }
     }
 }
+
 
 sub copy {
     my ($self) = @_;
@@ -205,6 +220,26 @@ sub _extract {
 }
 
 
+sub _merge_array {
+    my ($self, $target, $source) = @_;
+
+    if (!ref $source) {
+        push @$target, $source;
+    }
+    elsif (ref $source eq 'ARRAY') {
+        for my $elem (@$source) {
+            if (ref $elem eq 'ARRAY') {
+                # find a matching nested array to merge, otherwise push as new
+                push @$target, $elem;
+            } else {
+                push @$target, $elem;
+            }
+        }
+    }
+    else {
+        $self->{_error} = "Cannot merge non-array into array";
+    }
+}
 
 sub _merge_hash {
     my ($self, $target, $source) = @_;
@@ -255,19 +290,6 @@ sub _sanitize_key {
 __END__
 
 
-Existing type   New type    Action
-scalar          scalar      concatenate
-scalar          arrayref	convert scalar → array, push new values
-scalar          hashref     error
-arrayref        scalar      push scalar
-arrayref        arrayref    push items
-arrayref        hashref     error
-hashref         scalar      error
-hashref         arrayref    even number → convert to k/v pairs; odd → error
-hashref         hashref     merge recursively (HoH supported)
-
-
-
 =head1 NAME
 
 Vigil::QueryString - Safe, flexible query string construction and management. Ever wish you could store an array or a hash in a
@@ -280,34 +302,38 @@ Vigil::QueryString - Safe, flexible query string construction and management. Ev
     my $qs = Vigil::QueryString->new;
 
     # Add key/value pairs
+    $qs->add('foo', 'bar');
     $qs->add(color => 'blue', size => 'large');
     $qs->append(color => 'red');   # Add additional value to a key
     $qs->delete('size');           # Remove a key if needed
 
     # Retrieve values
-    my $color      = $qs->get('color');        # returns arrayref if multiple values
+    my $value      = $qs->get('bar');
+    my $array_ref  = $qs->get('color');        # returns arrayref if multiple values
     my @values     = @{ $qs->get('color') };   # dereference to get list
-    my %all_pairs  = $qs->get;                 # all key/value pairs
-    my $all_ref    = $qs->get;                 # hashref of all pairs
+    my $hash_ref   = $qs->get;                # hashref of all pairs
+    my %all_pairs  = %{ $qs->get };            # all key/value pairs
 
     # Create final query string
     my $url = "https://www.foo.com/program.pl?" . $qs->create;
 
 =head1 DESCRIPTION
 
-Vigil::QueryString simplifies the creation and management of URL query strings.  
+Vigil::QueryString simplifies the creation and management of URL query strings. It simplifies handling arrays, hashes, and nested structures in your query strings.
 
 - Ensures all keys and values are properly URL-encoded.
 - Allows incremental building of key/value pairs without needing to assemble everything at once.
 - Supports retrieval of values by key, multiple keys, or the entire set of contents.
 - Generates the final query string cleanly and safely with C<create>.
+- Supports arrays, nested arrays, hashes, nested hashes being placed into, and read from, querystrings.
+- It supports arbitrary nesting within practical memory and stack limits.
 
 This module reduces boilerplate, prevents common mistakes, and provides a consistent API for handling query strings in Perl.
 
 
 =head2 GETTING DATA vs CREATING A QUERY STRING
 
-There are two distincly different processes in this module. These are receiving a query string from an incoming request (getting) and creating a query string to be sent out to a webpage/etc.
+There are two distincly different processes in this module. These are receiving a query string from an incoming request (getting) and creating a query string to be printed out to a webpage, email, etc.
 
 The data for each of these is partitioned and only some methods work with one, while the rest work with the other.
 
@@ -355,113 +381,172 @@ You can add your key/value pairs in a variety of ways - choose the one that work
 
 I<Outgoing query string only.>
 
+Note that add() can get complicated as it is written to handle a wide variety of input methods. Find the one(s) you need for
+your particular purposes and focus on them.
+
 =over 4
 
-(key => value)      Standard hash syntax; works as a single key/value pair
+Add a single key/value pair at a time, typical of query strings:
 
-(key, value)        Flat list; equivalent to the previous one but not using =>
+	$obj->add('colour', 'blue');
+	$obj->add('length', '5.0');
+	$obj->add('userid', 1234);
 
-(@key_value_pairs)  Flat list of multiple keys and values
+Add multiple key/value pairs, typical of query strings:
 
-(%keyvaluepairs)    Hash variable; converted internally to key/value pairs
+I<NOTE: Pay close attention to the difference in the ways you enter these>
 
-($arrayref)         Array reference; automatically dereferenced ("flattened") to a list of key/value pairs
+    #            key       value   key       value  key      value
+    my @data = ('colour', 'blue', 'length', '5.0', 'userid', 1234);
 
-(\@array)           Array reference; automatically dereferenced to a list of key/value pairs
-
-($hashref)          Hash reference; automatically dereferenced to a list of key/value pairs
-
-(\%hash)            Hash reference; automatically dereferenced to a list of key/value pairs
-
-([a,b,c,d])         Arrayref of key/value pairs; automatically flattened
-
-({a,b,c,d})         Hashref of key/value pairs; automatically flattened
-
-=back
-
-Here are examples of each:
-
-	$obj->add('colour' => 'blue');
-	$obj->add('colour' => 'blue', 'length' => '5.0', 'userid' => 1234);
-	$obj->add('colour', 'blue', 'length', '5.0', 'userid', 1234);
+    $obj->add(@data);
 	
-	#Add an array
-	my @data = ('colour', 'blue', 'length', '5.0', 'userid', 1234);
-	$obj->add(@data);
+This is the only instance in which you do not enter a key name with the add method. That is when the key names are part of the list of arguments. This is also the only time you enter a full array as an argument to this method.
 	
-	#Add an array ref
-	$obj->add(\@data);
-	$obj->add(['colour', 'blue', 'length', '5.0', 'userid', 1234]);
-	my $arrayref = \@data;
-	$obj->add($arrayref);
+Add a list of multiple items to one key:
+
+    my @fruits = ('apple', 'pear', 'banana', 'kumquot');
+
+    $obj->add('fruit', \@fruits);
+	
+    $obj->add('fruit', ['apple', 'pear', 'banana', 'kumquot']);
+	
+    my $fruit_ref = \@fruits;
+	
+    $obj->add('fruit', $fruit_ref);
+	
+NOTE: THIS WILL NOT WORK!
+
+    $obj->add('fruit', @fruits);
+	
+Explanation as to why it won't work: If you pass an array (not an array reference), the method turns the arguments directly into a hash. Since there is a keyname, that list gets flattened and cannot be made into a set or key/value pairs.
+
+Add a multi-dimensional list (nested arrays)
+
+    my @nested_data = ('movies', 'stories', ['soda', 'popcorn', ['jujubes', 'licorice']], 'arcades');
+	$obj->add('entertainment', \@nested_data);
+	
+    my $nested_data_ref = \@nested_data;
+	$obj->add('entertainment', $nested_data_ref);
+	
+    my $nested_data_ref = ['movies', 'stories', ['soda', 'popcorn', ['jujubes', 'licorice']], 'arcades'];
+    $obj->add('entertainment', $nested_data_ref);
+
+Add a hash of key/value pairs
+
+    my %names = (
+      'Bobby' => 'Cooper',
+      'Mustang' => 'Sally',
+      'Copperhead' => 'Road'
+    );
+
+    $obj->add('names', \%names);
+	
+    my $hash_ref = \%names;
+    $obj->add($hash_ref);
+	
+    $obj->add('names', 
+        {
+            'Bobby' => 'Cooper',
+            'Mustang' => 'Sally',
+            'Copperhead' => 'Road'
+        }
+    );
 		
-	#Add a hash
-	my %data = ('colour' => 'blue', 'length' => '5.0', 'userid' => 1234);
-	$obj->add(%data);
-	
-	#Add a hash ref
-	$obj->add(\%data);
-	my $hashref = \%data;
-	$obj->add($hashref);
-	$obj->add({'colour' => 'blue', 'length' => '5.0', 'userid' => 1234});
-	
-Here is an example of adding a key value pair where one value is a list:
+NOTE: THIS WILL NOT WORK!
 
-	$obj->add(
-		color    => ['blue', 'red'],  # value is an arrayref
-		size     => 'large',
-		userid   => 1234
-	);
+    $obj->add('names', %names);
 	
-This will also work:
+Add a multi-dimensional hash (HoH)
 
-	my @colours = ('blue', 'red');
-	$obj->add(
-		color    => \@colours,  # value is an array ref
-		size     => 'large',
-		userid   => 1234
-	);
+    my %favourite_things = (
+        people => {
+            singers => 'Jesse Glynne',
+            actors  => 'Karen Gillan',
+            YouTube => 'Amy Shira Teitel'
+        },
+        movies => {
+            marvel => 'Guardians of the Galaxy Vol 1 & 2',
+            'DC Comics' => 'Wonderwoman 1984',
+        },
+        Food => {
+            Pasta => {
+                Noodle => 'Spaghettini',
+                Sauce  => 'Bolognaise',
+            },
+            Meat => 'Meatloaf',
+            Breakfast => {
+                Protein => 'Eggs',
+                Side  => 'Mustard Pickles',
+                Carbohydrate => 'Pan Fries',
+            }
+        }
+    );
 	
-The resulting query string would concatenate that list with commas like this:
+    $obj->add('Favourites', \%favourite_things);
+	
+    my $favs_hash_ref = \%favourite_things;
+    $obj->add('Favourites', $favs_hash_ref);
+	
+    $obj->add('Favourites', {people => {singers => 'Jesse Glynne',actors  => 'Karen Gillan',YouTube => 'Amy Shira Teitel'},movies => {marvel => 'Guardians of the Galaxy Vol 1 & 2','DC Comics' => 'Wonderwoman 1984'},Food => {Pasta => {Noodle => 'Spaghettini', Sauce  => 'Bolognaise'}, Meat => 'Meatloaf', Breakfast => {Protein => 'Eggs', Side => 'Mustard Pickles', Carbohydrate => 'Pan Fries'}}});
+	
+	
+NOTE: THIS WILL NOT WORK!
 
-    "colour=blue,red&size=large&userid=1234"
+    $obj->add('Favourites', %favourite_things);
 	
-This will B<NOT WORK>:
-
-	my @colours = ('blue', 'red');
-	$obj->add(
-		color    => @colours,  #value is an array: BAD
-		size     => 'large',
-		userid   => 1234
-	);
-	
+=back
 
 B<OVERWRITE WARNING>
 
 If you add a key value pair to the object, then add that key again with a new value, the previous value gets overwritten.
 
-	$obj->add('colour', 'blue');
-	print $obj->get('colour');   #Prints: blue
+    $obj->add('colour', 'blue');
+    print $obj->get('colour');   #Prints: blue
 	
-	$obj->add('colour', 'blue');
-	$obj->add('colour', 'magenta');
-	print $obj->get('colour');   #Prints: magenta
+    $obj->add('colour', 'blue');
+    $obj->add('colour', 'magenta');
+    print $obj->get('colour');   #Prints: magenta
 	
 If you want multiple values for one key, use the C<append()> method.
 
 
 =item append( KEY_VALUE_PAIRS )
 
-Appends additional values to keys, creating a list if the key already exists.
+Append a string to a string - it concatenates exactly what it is given:
 
-	$obj->add(colour => 'green');
-	#the key colour now contains => green
+    $obj->add('colour' => 'green');
+    #the key colour now contains => green
 
-	$obj->append(colour => 'red');
-	#the key colour now contains => green,red
+    $obj->append('colour' => 'red');
+    #the key colour now contains => greenred
 
-	$obj->append(color => ['fuschia', 'mauve', 'chartreuse']);
-	#the key colour now contains => green,red,fuschia,mauve,chartreuse
+Append a string to a list, that item gets added as a new item in the list
+	
+    $obj->add('colour' => ['fuschia', 'mauve', 'chartreuse']);
+    $obj->append('colour', 'green');
+    #the key colour now contains => fuschia,mauve,chartreuse,green
+
+Append a list to a string, that string becomes the first element in a new list
+	
+    $obj->add('pie', 'blueberry');
+    $obj->append('pie', ['coconut cream', 'apple', 'lemon meringue']);
+    $the key pie now contains ['blueberry', 'coconut cream', 'apple', 'lemon meringue']
+	
+Append a hash ref to a key that contains a hash:
+	
+    $obj->add('people', {'singers' => 'Jesse Glynne', 'actors' => 'Karen Gillan', 'YouTube' => 'Amy Shira Teitel'});
+	
+    my %new_peeps = ('hockey player' => 'Bernie Parent', 'baseball player' => 'Danny Ainge', 'actors' => 'William Shatner');
+    $obj->append('people', \%new_peeps);
+    #people now contains: 
+    {
+        'singers' => 'Jesse Glynne',
+        'actors' => 'William Shatner',
+        'YouTube' => 'Amy Shira Teitel',
+        'hockey player' => 'Bernie Parent',
+        'baseball player' => 'Danny Ainge'
+    }
 
 I<Outgoing query string only.>
 
@@ -469,20 +554,21 @@ I<Outgoing query string only.>
 
 Accepts one or more keys and deletes those keys from the object.
 
-    $obj->add('colour' => ['blue', 'red'], 'size' => 'L');
+    $obj->add('colour' => ['blue', 'red'], 'size' => 'L', 'pie' => 'blueberry');
     $obj->append('size', 'M');
     $obj->delete('colour');
     print Dumper $obj;
         #Prints out
         $VAR1 {
             'size' => ['L', 'M'],
+			'pie' => 'blueberry',
         }
 		
 I<Outgoing query string only.>
 
 =item exists($key)
 
-Returns true if the key exists. You can only check one key at a time.
+Returns true if the key exists. You can only check one key at a time. Also, it only works on top level keys - it will not work on nested hashes.
 
     return true if $obj->exists('key_name');
 
@@ -490,13 +576,13 @@ I<Outgoing query string only.>
 
 =item get(@keys)
 
-Retrieves values for one, several, or all keys from the incoming query string. 
+Retrieves values for one, several, or all keys from the B<incoming> query string. 
 
 I<Note that this will NOT return any key/value pairs that were added or
 appended to this object in the current program instance; it only
 reflects what was received from the query string.>
 
-There are only three types of data (strings, lists, and references) that are returned from
+There are only three types of data (strings, array references, and hash references) that are returned from
 this method, but they are returned in very useful ways.The most common access will be for
 a single key to return a single value:
 
@@ -533,8 +619,7 @@ URL?colour=blue&size=X-Large&foo=bar&baz=qux
 
 B<Now we C<get()> keys with lists as values>
 
-This module allows you to create and receive key/value pairs where the value is a list. In a query string this has to be
-represented as a CSV string, but the object will convert it to a list for you.
+This module allows you to create and receive key/value pairs where the value is a list.
 
 URL?colour=blue,green,red&size=X-Large&foo=bar&baz=qux
 
@@ -629,74 +714,14 @@ If you call the method C<$obj-E<gt>flatten_returned_list(1)>, then you will get 
           'codedoc' => '19-456-7',
           'id' => '897uhjjpa05'
     };
+	
+If you apply the flatten return lists flag to hash refs, the structure does not get flattened, only the values that are lists.
 
 If you wish to return to list mode, then you can turn off the semaphore with C<$obj-E<gt>flatten_returned_list(0)>
 
-
-In the section on the C<get> method, you saw these:
-
-URL?colour=blue,green,red&size=X-Large&foo=bar&baz=qux
-
-    my $colour = $obj->get('colour');
-	
-    print $colour;                #Prints something like: ARRAY(0x55a1c3f8e3c0)
-	
-    print join(', ', @$colour);   #Prints: blue, green, red
-
-    print $colour->[0];           #Prints: blue
-	
-    print $colour->[1];           #Prints: green
-	
-    print $colour->[2];           #Prints: red
-
-
-Selecting multiple keys with one as a list
-
-    my $multiples = $obj->get('colour', 'size', 'foo');
-
-    print join(', ', @{$multiples->[0]}); #Prints: blue, green, red
-
-    print $multiples->[0][0];         #Prints: blue
-	
-    print $multiples->[0][1];         #Prints: green
-	
-    print $multiples->[0][2];         #Prints: red
-
-    print $multiples->[1];            #Prints: X-large
-    
-    print $multiples->[2];            #Prints: bar
-	
-With the C<$obj-E<gt>flatten_returned_list(1)> turned on, the results would be:
-
-URL?colour=blue,green,red&size=X-Large&foo=bar&baz=qux
-
-    my $colour = $obj->get('colour');
-	
-    print $colour;                #Prints: blue, green, red
-	
-    print join(', ', @$colour);   #Use of uninitialized value in array dereference
-
-    print $colour->[0];           #Prints: b
-	
-Selecting multiple keys with one as a list
-
-    my $multiples = $obj->get('colour', 'size', 'foo');
-
-    print join(', ', @{$multiples->[0]}); #Use of uninitialized value in array dereference
-
-    print $multiples->[0][0];         #Prints: b
-	
-    print $multiples->[0];            #Prints: blue, green, red
-	
-    print $multiples->[1];            #Prints: X-large
-    
-    print $multiples->[2];            #Prints: bar
-
-B<WARNING: The C<$obj-E<gt>flatten_returned_list(1)> method has NO effect on the arrayref returned when you call C<$obj-E<gt>get> with no arguments.>
-
 =item create
 
-Returns the final query string, properly URL-encoded, ready to append to a URL. The generated query string does not include the query delimeter C<?>.
+Returns the final query string, properly URL-encoded, ready to append to a URL. The generated query string does include the query delimeter C<?>.
 
     my $link_url = 'https://www.foo.com/nifty_program.pl?' . $obj->create;
 
@@ -768,6 +793,8 @@ To use encryption on the query strings you must call the encryption_key() method
 
 From this point on, you just need to call C<get()> and/or C<create()>.
 
+Note: You can also call C<$obj-E<gt>aad($AAD_VALUE);> separately.
+
 Here is a more verbose example:
 
 
@@ -794,7 +821,7 @@ Here is a more verbose example:
 	
     my $script_url = "https://$ENV{'SERVER_NAME'}$ENV{'SCRIPT_NAME'}" . '?' . $qs->create;
 
-What the user would see looking at the sourced code of the page is:
+What the user would see looking at the sourced code of the page is something like:
 
     https://mydomain.com/cgi-bin/nifty_script.pl?XnL5d3w4p9Q7Gd9kZu3QF1VhYxC2sL1p9aR6uW7hQm8vT9zR3yF2xG7dJ4kN8oP0cR
 
