@@ -100,18 +100,18 @@ sub append {
         if (!ref $existing) {
             if (!ref $val) { $self->{_new_qs}{$clean_key} .= $val }
             elsif (ref $val eq 'ARRAY') { $self->{_new_qs}{$clean_key} = [$existing, @$val] }
-            elsif (ref $val eq 'HASH') { $self->{_error} = "Cannot append hashref to scalar key '$key'" }
+            elsif (ref $val eq 'HASH') { push @{ $self->{errors} }, "Cannot append hashref to scalar key '$key'" }
         }
         elsif (ref $existing eq 'ARRAY') {
             $self->_merge_array($existing, $val);
         }
         elsif (ref $existing eq 'HASH') {
             if (!ref $val) {
-                $self->{_error} = "Cannot append scalar to hash key '$key'";
+                push @{ $self->{errors} }, "Cannot append scalar to hash key '$key'";
             }
             elsif (ref $val eq 'ARRAY') {
                 if (@$val % 2) {
-                    $self->{_error} = "Array must have even number of items to append to hash key '$key'";
+                    push @{ $self->{errors} }, "Array must have even number of items to append to hash key '$key'";
                 } else {
                     while (@$val) {
                         my $k = shift @$val;
@@ -125,7 +125,7 @@ sub append {
             }
         }
         else {
-            $self->{_error} = "Unsupported type for key '$key'";
+            push @{ $self->{errors} }, "Unsupported type for key '$key'";
         }
     }
 }
@@ -237,7 +237,7 @@ sub _merge_array {
         }
     }
     else {
-        $self->{_error} = "Cannot merge non-array into array";
+        push @{ $self->{errors} }, "Cannot merge non-array into array";
     }
 }
 
